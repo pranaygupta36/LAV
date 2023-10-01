@@ -231,7 +231,7 @@ def get_image_point(point, K, w2c, e2w):
 
     return point_img[0:2]
 
-def vis_bev(bev, ego_matrix, camera, pred_loc, det, cast_locs, cast_cmds, important_vehicles):
+def vis_bev(bev, ego_matrix, camera, pred_loc, det, cast_locs, cast_cmds, important_vehicles, object_removal_scores = [], object_retention_scores = []):
     K = build_projection_matrix()
     w2c = camera.get_transform().get_inverse_matrix()
     e2w = ego_matrix
@@ -289,6 +289,30 @@ def vis_bev(bev, ego_matrix, camera, pred_loc, det, cast_locs, cast_cmds, import
             bev = cv2.circle(bev, tuple(get_image_point(loc, K, w2c, e2w).astype(int)), 3, color, -1)
         cv2.drawContours(bev, np.array([[p1,p2,p3,p4]]).astype(int), 0, color, 2)
         important_vehicle_bb_image_locations.append([p1, p2, p3, p4])
+
+    for v in object_removal_scores:
+        vehicle = v[0]
+        err = v[1]
+
+        ex = vehicle.bounding_box.extent.x
+        ey = vehicle.bounding_box.extent.y
+        
+        p1 = np.array([-ex-0.1, -ey-0.1, 0, 1])
+        p2 = np.array([-ex-0.1, ey+0.1, 0, 1])
+        p3 = np.array([ex+0.1, ey+0.1, 0, 1])
+        p4 = np.array([ex+0.1, -ey-0.1, 0, 1])
+        p1 = tuple(get_image_point(p1, K, w2c, vehicle.get_transform().get_matrix()))
+        p2 = tuple(get_image_point(p2, K, w2c, vehicle.get_transform().get_matrix()))
+        p3 = tuple(get_image_point(p3, K, w2c, vehicle.get_transform().get_matrix()))
+        p4 = tuple(get_image_point(p4, K, w2c, vehicle.get_transform().get_matrix()))
+
+        cv2.drawContours(bev, np.array([[p1,p2,p3,p4]]).astype(int), 0, (0,255*(min(err/30, 1)),0), 2)
+
+        if err > 5:
+            for loc in v[2]:
+                loc = np.array([-1*loc[1], loc[0], 3, 1])
+                bev = cv2.circle(bev, tuple(get_image_point(loc, K, w2c, e2w).astype(int)), 3, (0, 255*(min(err/30, 1)),0), -1)
+
 
     return bev, important_vehicle_bb_image_locations
 
@@ -594,6 +618,267 @@ def counterfactual_plan_collide(ego_plan_locs, camera, ego_matrix, ego_vehicle, 
         
     return important_vehicles, modded_trajectories
 
+def move_lidar_points(lidar, dloc, ori0, ori1):
+
+    dloc = dloc @ [
+        [ np.cos(ori0), -np.sin(ori0)],
+        [ np.sin(ori0), np.cos(ori0)]
+    ]
+
+    ori = ori1 - ori0
+    lidar = lidar @ [
+        [np.cos(ori), np.sin(ori),0],
+        [-np.sin(ori), np.cos(ori),0],
+        [0,0,1],
+    ]
+
+    lidar[:,:2] += dloc
+    
+    return lidar
+
+def get_stacked_lidar(locs, oris, lidars, num_frame_stack):
+
+    loc0, ori0 = locs[-1], oris[-1]
+
+    rel_lidars = []
+    for i, t in enumerate(range(len(lidars)-1, -1, -5)):
+        loc, ori = locs[t], oris[t]
+        lidar = lidars[t]
+
+        lidar_xyz = lidar[:,:3]
+        lidar_f = lidar[:,3:]
+
+        lidar_xyz = move_lidar_points(lidar_xyz, loc - loc0, ori0, ori)
+        lidar_t = np.zeros((len(lidar_xyz), num_frame_stack+1), dtype=lidar_xyz.dtype)
+        lidar_t[:,i] = 1      # Be extra careful on this.
+
+        rel_lidar = np.concatenate([lidar_xyz, lidar_f, lidar_t], axis=-1)
+
+        rel_lidars.append(rel_lidar)
+
+    return np.concatenate(rel_lidars)
+
+def get_lidar_to_vehicle_transform():
+        # yaw = -90
+        # rot = np.array([[0, 1, 0],
+        #                 [-1, 0, 0],
+        #                 [0, 0, 1]], dtype=np.float32)
+        rot = np.array([[1, 0, 0],
+                        [0, 1, 0],
+                        [0, 0, 1]], dtype=np.float32)
+        T = np.eye(4)
+
+        T[0, 3] = 0.0
+        T[1, 3] = 0.0
+        T[2, 3] = 2.4
+        T[:3, :3] = rot
+        return T
+
+def get_points_in_bbox(ego_matrix, vehicle_matrix, dx, lidar):
+    # inverse transform lidar to 
+    Tr_lidar_2_ego = get_lidar_to_vehicle_transform()
+    
+    # construct transform from lidar to vehicle
+    Tr_lidar_2_vehicle = np.linalg.inv(vehicle_matrix) @ ego_matrix @ Tr_lidar_2_ego
+
+    # transform lidar to vehicle coordinate
+    lidar_vehicle = Tr_lidar_2_vehicle[:3, :3] @ lidar[:, :3].T + Tr_lidar_2_vehicle[:3, 3:]
+    
+    # check points in bbox
+    x, y, z = dx / 2.
+    # why should we use swap?
+    # x, y = y, x
+    t = 1
+
+    points_idx = ((lidar_vehicle[0] < (x+t)) & (lidar_vehicle[0] > -x-t) & 
+                    (lidar_vehicle[1] < (y+t)) & (lidar_vehicle[1] > -y-t) & 
+                    (lidar_vehicle[2] < (z+t)) & (lidar_vehicle[2] > -z-t))
+    # num_points = ((lidar_vehicle[0] < (x+t)) & (lidar_vehicle[0] > -x-t) & 
+    #                 (lidar_vehicle[1] < (y+t)) & (lidar_vehicle[1] > -y-t) & 
+    #                 (lidar_vehicle[2] < (z+t)) & (lidar_vehicle[2] > -z-t)).sum()
+    
+    return points_idx
+
+def get_nearby_object(vehicle_position, actor_list, radius):
+    nearby_objects = []
+    for actor in actor_list:
+        trigger_box_global_pos = actor.get_transform().transform(actor.trigger_volume.location)
+        trigger_box_global_pos = carla.Location(x=trigger_box_global_pos.x, y=trigger_box_global_pos.y, z=trigger_box_global_pos.z)
+        if (trigger_box_global_pos.distance(vehicle_position) < radius):
+            nearby_objects.append(actor)
+    return nearby_objects
+
+def dot_product(vector1, vector2):
+    return (vector1.x * vector2.x + vector1.y * vector2.y + vector1.z * vector2.z)
+
+def cross_product(vector1, vector2):
+    return carla.Vector3D(x=vector1.y * vector2.z - vector1.z * vector2.y, y=vector1.z * vector2.x - vector1.x * vector2.z, z=vector1.x * vector2.y - vector1.y * vector2.x)
+
+def get_separating_plane(rPos, plane, obb1, obb2):
+    ''' Checks if there is a seperating plane
+    rPos Vec3
+    plane Vec3
+    obb1  Bounding Box
+    obb2 Bounding Box
+    '''
+    return (abs(dot_product(rPos, plane)) > (abs(dot_product((obb1.rotation.get_forward_vector() * obb1.extent.x), plane)) +
+                                                    abs(dot_product((obb1.rotation.get_right_vector()   * obb1.extent.y), plane)) +
+                                                    abs(dot_product((obb1.rotation.get_up_vector()      * obb1.extent.z), plane)) +
+                                                    abs(dot_product((obb2.rotation.get_forward_vector() * obb2.extent.x), plane)) +
+                                                    abs(dot_product((obb2.rotation.get_right_vector()   * obb2.extent.y), plane)) +
+                                                    abs(dot_product((obb2.rotation.get_up_vector()      * obb2.extent.z), plane)))
+            )
+
+def check_obb_intersection(obb1, obb2):
+    RPos = obb2.location - obb1.location
+    return not(get_separating_plane(RPos, obb1.rotation.get_forward_vector(), obb1, obb2) or
+                get_separating_plane(RPos, obb1.rotation.get_right_vector(),   obb1, obb2) or
+                get_separating_plane(RPos, obb1.rotation.get_up_vector(),      obb1, obb2) or
+                get_separating_plane(RPos, obb2.rotation.get_forward_vector(), obb1, obb2) or
+                get_separating_plane(RPos, obb2.rotation.get_right_vector(),   obb1, obb2) or
+                get_separating_plane(RPos, obb2.rotation.get_up_vector(),      obb1, obb2) or
+                get_separating_plane(RPos, cross_product(obb1.rotation.get_forward_vector(), obb2.rotation.get_forward_vector()), obb1, obb2) or
+                get_separating_plane(RPos, cross_product(obb1.rotation.get_forward_vector(), obb2.rotation.get_right_vector()),   obb1, obb2) or
+                get_separating_plane(RPos, cross_product(obb1.rotation.get_forward_vector(), obb2.rotation.get_up_vector()),      obb1, obb2) or
+                get_separating_plane(RPos, cross_product(obb1.rotation.get_right_vector()  , obb2.rotation.get_forward_vector()), obb1, obb2) or
+                get_separating_plane(RPos, cross_product(obb1.rotation.get_right_vector()  , obb2.rotation.get_right_vector()),   obb1, obb2) or
+                get_separating_plane(RPos, cross_product(obb1.rotation.get_right_vector()  , obb2.rotation.get_up_vector()),      obb1, obb2) or
+                get_separating_plane(RPos, cross_product(obb1.rotation.get_up_vector()     , obb2.rotation.get_forward_vector()), obb1, obb2) or
+                get_separating_plane(RPos, cross_product(obb1.rotation.get_up_vector()     , obb2.rotation.get_right_vector()),   obb1, obb2) or
+                get_separating_plane(RPos, cross_product(obb1.rotation.get_up_vector()     , obb2.rotation.get_up_vector()),      obb1, obb2))
+
+
+def display_vehicle_ids(vehicles, vis, camera, ego_vehicle, world):
+
+    K = build_projection_matrix()
+    w2c = camera.get_transform().get_inverse_matrix()
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    fontScale = 1
+    thickness = 2
+    vis = cv2.cvtColor(vis, cv2.COLOR_RGB2BGR)
+    vis = cv2.cvtColor(vis, cv2.COLOR_BGR2RGB)
+    vehicle_positions = {}
+    p1 = np.array([-1, -0.75, 2, 1])
+    p1 = tuple(get_image_point(p1, K, w2c, ego_vehicle.get_transform().get_matrix()).astype(int))
+    vis = cv2.putText(vis, "*", p1, font, fontScale, (int(255),int(255),int(255)), thickness, cv2.LINE_AA)
+
+    # draw traffi lights
+    actors = world.get_actors()
+    traffic_lights = actors.filter('*traffic_light*')
+    
+    ego_location = ego_vehicle.get_transform().location
+    ego_transform = ego_vehicle.get_transform()
+    close_by_lights = []
+    light_dist = []
+    for light in traffic_lights:
+        if light.get_location().distance(ego_location) < 50:
+            close_by_lights.append(light)
+            light_dist.append(light.get_location().distance(ego_location))
+    
+    # base = np.array([closest_light.get_transform().location.x - ego_vehicle.get_transform().location.x, closest_light.get_transform().location.y - ego_vehicle.get_transform().location.y, closest_light.get_transform().location.z - ego_vehicle.get_transform().location.z]) 
+    # max_angle = -1*np.inf
+    # opp_light = None
+    # for light in close_by_lights:
+    #     if light.id == closest_light.id:
+    #         continue
+    #     light_ego_angle = np.array([light.get_transform().location.x - ego_vehicle.get_transform().location.x, light.get_transform().location.y - ego_vehicle.get_transform().location.y, light.get_transform().location.z - ego_vehicle.get_transform().location.z])  
+    #     angle = np.dot(light_ego_angle, base)/(np.linalg.norm(light_ego_angle)*np.linalg.norm(base))
+    #     # print(angle)
+    #     if angle > max_angle:
+    #         max_angle = angle
+    #         opp_light = light
+
+
+    _traffic_lights = get_nearby_object(ego_location, actors.filter('*traffic_light*'), 15.0)
+    
+    center_light_detector_bb = ego_transform.transform(carla.Location(x=-2.0, y=0.0, z=0.0))
+    extent_light_detector_bb = carla.Vector3D(x=4.5, y=1.5, z=2.0)
+    light_detector_bb = carla.BoundingBox(center_light_detector_bb, extent_light_detector_bb)
+    light_detector_bb.rotation = ego_transform.rotation
+    state = 'Green'
+    for light in _traffic_lights:
+        size = 0.1 # size of the points and bounding boxes used for visualization
+        # box in which we will look for traffic light triggers.            
+        center_bounding_box = light.get_transform().transform(light.trigger_volume.location)
+        center_bounding_box = carla.Location(center_bounding_box.x, center_bounding_box.y, center_bounding_box.z)
+        length_bounding_box = carla.Vector3D(light.trigger_volume.extent.x, light.trigger_volume.extent.y, light.trigger_volume.extent.z)
+        transform = carla.Transform(center_bounding_box) # can only create a bounding box from a transform.location, not from a location
+        bounding_box = carla.BoundingBox(transform.location, length_bounding_box)
+
+        gloabl_rot = light.get_transform().rotation
+        bounding_box.rotation = carla.Rotation(pitch = light.trigger_volume.rotation.pitch + gloabl_rot.pitch,
+                                            yaw   = light.trigger_volume.rotation.yaw   + gloabl_rot.yaw,
+                                            roll  = light.trigger_volume.rotation.roll  + gloabl_rot.roll)
+
+        if(check_obb_intersection(light_detector_bb, bounding_box) == True):
+            if (light.state == carla.libcarla.TrafficLightState.Red):
+                state = 'Red'
+            elif (light.state == carla.libcarla.TrafficLightState.Yellow):
+                state = 'Yellow'
+            else:
+                state = 'Green'
+
+    if len(close_by_lights) > 0:
+        closest_light = close_by_lights[np.argmin(np.array(light_dist))]
+        tl = np.array([0, 1, 2, 1])
+        tl = tuple(get_image_point(tl, K, w2c, closest_light.get_transform().get_matrix()).astype(int))
+        tr = np.array([2, 1, 2, 1])
+        tr = tuple(get_image_point(tr, K, w2c, closest_light.get_transform().get_matrix()).astype(int))
+        bl = np.array([0, 7, 2, 1])
+        bl = tuple(get_image_point(bl, K, w2c, closest_light.get_transform().get_matrix()).astype(int))
+        br = np.array([2, 7, 2, 1])
+        br = tuple(get_image_point(br, K, w2c, closest_light.get_transform().get_matrix()).astype(int))
+        vis = cv2.fillPoly(vis, [np.array([tl, bl, br, tr])],(0,0,0) )
+
+        pos_rl = np.array([1, 2, 2, 1])
+        pos_rl= tuple(get_image_point(pos_rl, K, w2c, closest_light.get_transform().get_matrix()).astype(int))
+        
+        if state != 'Red':
+            red_color = (0, 0, 100)
+        else:
+            red_color = (0, 0, 255)
+        if state != 'Yellow':
+            orange_color = (0, 65, 100)
+        else:
+            orange_color = (0, 165, 255)
+        if state != 'Green':
+            green_color = (0, 100, 0)
+        else:
+            green_color = (0, 255, 0)
+
+        vis = cv2.circle(vis, pos_rl, 10, red_color, -1)
+        pos_yl = np.array([1, 4, 2, 1])
+        pos_yl= tuple(get_image_point(pos_yl, K, w2c, closest_light.get_transform().get_matrix()).astype(int))
+        vis = cv2.circle(vis, pos_yl, 10, orange_color, -1)
+        pos_gl = np.array([1, 6, 2, 1])
+        pos_gl= tuple(get_image_point(pos_gl, K, w2c, closest_light.get_transform().get_matrix()).astype(int))
+        vis = cv2.circle(vis, pos_gl, 10, green_color, -1)
+    
+    
+
+
+    # mark pedestrians
+    pedestrians = [p for p in actors.filter('*walker*')]
+    cycle1 = [p for p in actors.filter('*diamondback*')]
+    cycle2 = [p for p in actors.filter('*crossbike*')]
+    cycle3 = [p for p in actors.filter('*gazelle*')]
+
+    for vehicle in pedestrians + cycle1 + cycle2 + cycle3:
+        if (vehicle.get_location().distance(ego_location) < 50):
+            pos = np.array([0, 0, 2, 1])
+            pos = tuple(get_image_point(pos, K, w2c, vehicle.get_transform().get_matrix()).astype(int))
+            vis = cv2.circle(vis, pos, 15, (255, 0, 0), 3)
+
+    for vehicle in vehicles:
+        pos = np.array([0, 0, 2, 1])
+        pos = tuple(get_image_point(pos, K, w2c, vehicle.get_transform().get_matrix()).astype(int))
+        # vis = cv2.circle(vis, pos, 15, (255, 0, 0), 3)
+        # print(vehicle)
+        vehicle_positions[vehicle.id] = pos
+
+    return vis, vehicle_positions
+
+
 def main():
 
     argparser = argparse.ArgumentParser(
@@ -714,6 +999,7 @@ def main():
         _read_route(world, agent_instance, route_id) # this calls self.set_global_plan()
         ego_speed = 0
         actor_history = {}
+        errors = []
         while True:
             step+=1 
             print(step)
@@ -730,24 +1016,27 @@ def main():
             _, spectator_view = input_data.get('BEV_RGB')
 
             spec_camera = sensor_list[-1]
-            
-            if os.path.exists("./lidar_point_clouds/" + str(route_id+1)) == False:
-                os.mkdir("./lidar_point_clouds/" + str(route_id+1))
 
-            if os.path.exists("./lidar_point_clouds/" + str(route_id+1) + '/recording_data/') == False:
-                os.mkdir("./lidar_point_clouds/" + str(route_id+1) + '/recording_data/')
+            if os.path.exists("./saved_data/") == False:
+                os.mkdir("./saved_data/")            
             
-            if os.path.exists("./lidar_point_clouds/" + str(route_id+1) + '/recording_data/bev') == False:
-                os.mkdir("./lidar_point_clouds/" + str(route_id+1) + '/recording_data/bev')
+            if os.path.exists("./saved_data/" + str(route_id+1)) == False:
+                os.mkdir("./saved_data/" + str(route_id+1))
+
+            if os.path.exists("./saved_data/" + str(route_id+1) + '/recording_data/') == False:
+                os.mkdir("./saved_data/" + str(route_id+1) + '/recording_data/')
             
-            if os.path.exists("./lidar_point_clouds/" + str(route_id+1) + '/recording_data/bev_projected') == False:
-                os.mkdir("./lidar_point_clouds/" + str(route_id+1) + '/recording_data/bev_projected')
+            if os.path.exists("./saved_data/" + str(route_id+1) + '/recording_data/bev') == False:
+                os.mkdir("./saved_data/" + str(route_id+1) + '/recording_data/bev')
             
-            if os.path.exists("./lidar_point_clouds/" + str(route_id+1) + '/recording_data/data') == False:
-                os.mkdir("./lidar_point_clouds/" + str(route_id+1) + '/recording_data/data')
+            if os.path.exists("./saved_data/" + str(route_id+1) + '/recording_data/bev_projected') == False:
+                os.mkdir("./saved_data/" + str(route_id+1) + '/recording_data/bev_projected')
+            
+            if os.path.exists("./saved_data/" + str(route_id+1) + '/recording_data/data') == False:
+                os.mkdir("./saved_data/" + str(route_id+1) + '/recording_data/data')
             
             bev_viz, modded_trajectory_vehicles_bb_locations = vis_bev(spectator_view, ego_matrix, spec_camera, ego_plan_locs, og_det, other_cast_locs, other_cast_cmds, important_vehicles)   
-            cv2.imwrite("./lidar_point_clouds/" + str(route_id+1) + "/recording_data/bev/" + str(step) + ".png", bev_viz)
+            cv2.imwrite("./saved_data/" + str(route_id+1) + "/recording_data/bev/" + str(step) + ".png", bev_viz)
             
             
             vehicle_data = {}
@@ -770,7 +1059,7 @@ def main():
             if len(ego_plan_locs) > 0:
                 projected_important_vehicles, projected_modded_trajectories = counterfactual_plan_collide(ego_plan_locs, spec_camera, ego_matrix, ego_vehicle, other_actors, actor_history)
             bev_viz = vis_bev_projected(bev_viz, ego_matrix, spec_camera, ego_plan_locs, og_det, other_cast_locs, other_cast_cmds, projected_important_vehicles)   
-            cv2.imwrite("./lidar_point_clouds/" + str(route_id+1) + "/recording_data/bev_projected/projected_" + str(step) + ".png", bev_viz)
+            cv2.imwrite("./saved_data/" + str(route_id+1) + "/recording_data/bev_projected/projected_" + str(step) + ".png", bev_viz)
 
             for actor in other_actors:
                 vehicle_data[actor.id] = [str(actor.type_id), [actor.get_acceleration().x, actor.get_acceleration().y, actor.get_acceleration().z], 
@@ -779,7 +1068,7 @@ def main():
                 [actor.get_velocity().x, actor.get_velocity().y, actor.get_velocity().z], actor.type_id]
 
             data = np.array([ego_plan_locs, other_cast_locs, other_cast_cmds, modded_trajectories, ego_perturb_important, modded_ego_trajectories, projected_important_vehicles, modded_trajectory_vehicles_bb_locations, important_vehicles, vehicle_data])
-            np.save('./lidar_point_clouds/' + str(route_id+1) + '/recording_data/data/' + str(step) + '.npy', data)
+            np.save('./saved_data/' + str(route_id+1) + '/recording_data/data/' + str(step) + '.npy', data)
             # _, spectator_view = input_data.get('BEV_RGB')
             
  
@@ -791,6 +1080,93 @@ def main():
             # wallclock_diff = (wallclock - self._agent._agent.wallclock_t0).total_seconds()
 
             # # print('======[Agent] Wallclock_time = {} / {} / Sim_time = {} / {}x'.format(wallclock, wallclock_diff, timestamp, timestamp/(wallclock_diff+0.001)))
+            if os.path.exists("./saved_data/" + str(route_id + 1)) == False:
+                os.mkdir("./saved_data/" + str(route_id + 1))
+            if os.path.exists("./saved_data/" + str(route_id + 1) + "/og") == False:
+                os.mkdir("./saved_data/" + str(route_id + 1) + "/og")
+            if os.path.exists("./saved_data/" + str(route_id + 1) + "/og/bev") == False:
+                os.mkdir("./saved_data/" + str(route_id + 1) + "/og/bev")
+            if os.path.exists("./saved_data/" + str(route_id + 1) + "/og/bev_unmarked") == False:
+                os.mkdir("./saved_data/" + str(route_id + 1) + "/og/bev_unmarked")
+            if os.path.exists("./saved_data/" + str(route_id + 1) + "/data") == False:
+                os.mkdir("./saved_data/" + str(route_id + 1) + "/data")
+            if len(_agent._agent.locs) > 0:
+                stacked_lidar = get_stacked_lidar(_agent._agent.locs, _agent._agent.oris, _agent._agent.lidars, _agent._agent.num_frame_stack)
+                lidar_points = torch.tensor(stacked_lidar, dtype=torch.float32)
+            
+            ego_action.manual_gear_shift = False
+            # ego_action, ego_locs = self._agent(self.step)
+            
+            og_lidars = [np.copy(i) for i in _agent._agent.lidars]
+            colors = [ 
+            carla.Color(r = 255, g = 0, b = 0), 
+            carla.Color(r = 0, g = 255, b = 0),
+            carla.Color(r = 0, g = 0, b = 255),
+            carla.Color(r = 255, g = 255, b = 0),
+            carla.Color(r = 255, g = 0, b = 255), 
+            carla.Color(r = 0, g = 255, b = 255),
+            carla.Color(r = 255, g = 255, b = 255)]
+            j = 0
+            object_removal_scores = []
+            ors = []
+            visible_vehicles = {}
+            for vehicle in other_actors:
+                if vehicle.id == ego_vehicle.id:
+                    continue
+                mod_lidars = deque()
+                is_visible = False
+                if len(_agent._agent.lidars) > 0:
+                    # find the points pertaining to this vehicle in any of the lidar point clouds
+                        # remove from past frames
+                        # remove from current frame
+
+                    for f_num, frame in enumerate(og_lidars):
+                        vehicle_extent = vehicle.bounding_box.extent
+                        dx = np.array([vehicle_extent.x, vehicle_extent.y, vehicle_extent.z]) * 2.
+                        points = get_points_in_bbox(ego_matrix, vehicle.get_transform().get_matrix(), dx, frame)
+                        if points.sum() > 0:
+                            is_visible = True
+                            if vehicle not in visible_vehicles:
+                                visible_vehicles[vehicle] = {f_num: points}
+                            else:
+                                visible_vehicles[vehicle][f_num] = points
+                            # print(vehicle, points.sum())
+                        # If present remove those points
+                        mod_lidars.append(frame[points == 0])
+
+                        
+
+                        
+                        # print(mod_lidars)
+
+                    if is_visible:
+                        assnd_color = colors[0]
+                        _agent._agent.lidars = mod_lidars
+                        _, object_removal_ego_locs, object_removal_det = _agent._agent.run_step(input_data, timestamp, step, 'object_removal', int(vehicle.id))
+                        #checking the removed point cloud
+                        
+                        stacked_lidar = get_stacked_lidar(_agent._agent.locs, _agent._agent.oris, mod_lidars, _agent._agent.num_frame_stack)
+                        lidar_points = torch.tensor(stacked_lidar, dtype=torch.float32)
+                        err = np.linalg.norm(ego_plan_locs - object_removal_ego_locs)
+                        errors.append(err)
+                        object_removal_scores.append([vehicle, err, object_removal_ego_locs])
+                        ors.append([vehicle.id, err, object_removal_ego_locs])
+
+
+            _agent._agent.lidars = deque(og_lidars)
+                    
+            bev_viz, important_vehicles_bb_locations = vis_bev(spectator_view, ego_matrix, spec_camera, ego_plan_locs, og_det, other_cast_locs, other_cast_cmds, important_vehicles, object_removal_scores, [])   
+            cv2.imwrite("./saved_data/" + str(str(route_id + 1)) + "/og/bev/" + str(step) + ".png", bev_viz)
+            
+            spectator_view, vehicle_positions = display_vehicle_ids([i[0] for i in object_removal_scores], spectator_view, spec_camera, ego_vehicle, world)
+            # print(vehicle_positions)
+            # spectator_view, vehicle_positions = display_vehicle_ids([], spectator_view, spec_camera, self.ego_vehicles[0], world)
+            cv2.imwrite("./saved_data/" + str(str(route_id + 1)) + "/og/bev_unmarked/" + str(step) + ".png", spectator_view)
+                
+            data = np.array([important_vehicles, important_vehicles_bb_locations, ors, [], og_det, vehicle_positions])
+            np.save("./saved_data/" + str(str(route_id + 1)) + "/data/" + str(step) + '.npy', data)
+            
+            
             world.tick()
 
     finally:
