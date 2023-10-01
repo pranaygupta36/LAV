@@ -1,4 +1,5 @@
 wandb/*
+lidar_point_cloud/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

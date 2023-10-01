@@ -1,0 +1,11 @@
+weights/bev_160.th
+weights/bev_v2_64.th
+weights/bra_10.th
+weights/bra_v2_9.pt
+weights/bra_v2_9.th
+weights/lidar_15.th
+weights/lidar_v2_7.th
+weights/seg_1.pt
+weights/seg_1.th
+weights/uniplanner_15.th
+weights/uniplanner_v2_7.th

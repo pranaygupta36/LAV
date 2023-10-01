@@ -1,4 +1,4 @@
-name: LAV-env
+name: CR-LAV-env
 channels:
   - pytorch
   - anaconda
