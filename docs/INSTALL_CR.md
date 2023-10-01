@@ -36,4 +36,10 @@ chmod +x setup_env_vars.sh
 ./setup_env_vars.sh
 ```
 
+* Download the LAV model weights from [here](https://cmu.box.com/s/09cda83xufxqfygat2hmm0e09u15tlpl)
+``` bash
+cp <path_to_weights.zip> <path_to_LAV>
+unzip weights.zip
+```
+
 Now, you can treat this conda environment the dedicated one (by defauld named `CR-LAV-env`). 
