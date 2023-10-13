@@ -378,11 +378,23 @@ class LAVAgent(AutonomousAgent):
         else:
             stacked_lidar = self.get_stacked_lidar_batch()
             lidar_points = [torch.tensor(s, dtype=torch.float32).to(self.device) for s in stacked_lidar]
+            # print(lidar_points)
             features = self.lidar_model.extract_features_only(lidar_points, [len(l) for l in lidar_points])
-            #DONE TILL HERE
+            print(features.shape)
+            # epl = []
+            # ecl = []
             ego_plan_locs, ego_cast_locs = self.uniplanner.infer_egoonly_batched(features, self.cmd_value, self.nxps)
+
+            # for i in range(len(features)):
+            #     ego_plan_locs, ego_cast_locs = self.uniplanner.infer_egoonly_batched(features[i][None], self.cmd_value, self.nxps)
+            #     epl.append(ego_plan_locs)
+            #     ecl.append(ego_cast_locs)
             ego_plan_locs = to_numpy(ego_plan_locs)
             ego_cast_locs = to_numpy(ego_cast_locs)
+                
+            # ego_plan_locs = to_numpy(torch.cat(epl, 0))
+            # ego_cast_locs = to_numpy(torch.cat(ecl, 0))
+            # print(ego_plan_locs.shape)
             if self.cmd_value in [4,5]:
                 ego_plan_locs = ego_cast_locs                
             return ego_plan_locs
@@ -406,13 +418,14 @@ class LAVAgent(AutonomousAgent):
 
             rel_lidars.append(rel_lidar)
             
-            return np.concatenate(rel_lidars)
+        return np.concatenate(rel_lidars)
 
     def get_stacked_lidar_batch(self):
         
         loc0, ori0 = self.locs[-1], self.oris[-1]
         batched_rel_lidars = []
         for b in range(len(self.lidars)):
+
             rel_lidars = []
             for i, t in enumerate(range(len(self.lidars[b])-1, -1, -GAP)):
                 loc, ori = self.locs[t], self.oris[t]
@@ -429,8 +442,7 @@ class LAVAgent(AutonomousAgent):
 
                 rel_lidars.append(rel_lidar)
             batched_rel_lidars.append(np.concatenate(rel_lidars))
-
-            return batched_rel_lidars
+        return batched_rel_lidars
 
     def counterfactual_plan_collide(self, ego_plan_locs, other_cast_locs, other_cast_cmds, dist_threshold_static=1.0, dist_threshold_moving=2.5):
         # TODO: Do a proper occupancy map?
@@ -624,19 +636,13 @@ class LAVAgent(AutonomousAgent):
 
 
     def det_inference_batched(self, heatmaps, sizemaps, orimaps, **kwargs):
-        print(heatmaps.shape)
-        print(sizemaps.shape)
-        print(orimaps.shape)
         dets = []
         for i in range(heatmaps.shape[1]):
             det = []
             c = heatmaps[:, i]
             out = extract_peak_batched(c, **kwargs) # B x len(det)
-            print(out)
             for b in range(len(out)):
-                print(len(out[b]))
                 for s, x, y in out[b]:
-                    print(y, x)
                     w, h = float(sizemaps[:,0,y,x]),float(sizemaps[:,1,y,x])
                     cos, sin = float(orimaps[:,0,y,x]), float(orimaps[:,1,y,x])
                     
@@ -644,20 +650,18 @@ class LAVAgent(AutonomousAgent):
                         continue
                     
                     # TODO: remove hardcode
-                    # if np.linalg.norm([x-160,y-280]) <= 2:
-                    #     continue
+                    if np.linalg.norm([x-160,y-280]) <= 2:
+                        continue
 
                     det.append((x,y,w,h,cos,sin))
                 dets.append(det)
         
-        print(dets)
         batched_dets = []
         b = heatmaps.shape[0]
         for i in range(b):
             k = i
             per_batch_det = []
             while k < len(dets):
-                print(k)
                 per_batch_det.append(dets[k])
                 k += b
             batched_dets.append(per_batch_det)

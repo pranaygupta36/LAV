@@ -190,6 +190,51 @@ class UniPlanner(nn.Module):
         """
         cropped_ego_features = self.crop_feature(
             features, 
+            torch.zeros((features.shape[0],2),dtype=features.dtype,device=features.device), 
+            torch.zeros((features.shape[0],),dtype=features.dtype,device=features.device),
+            pixels_per_meter=self.pixels_per_meter/2, crop_size=self.crop_size
+        )
+        ego_embd = self.lidar_conv_emb(cropped_ego_features)
+        ego_cast_locs_2 = self.cast(ego_embd, mode='ego')
+        ego_plan_locs_2 = self.plan(
+            ego_embd, nxp[None], 
+            cast_locs=ego_cast_locs_2,
+            pixels_per_meter=self.pixels_per_meter, 
+            crop_size=self.crop_size*2
+        )
+        # for i in range(ego_embd.shape[0]):
+        #     inds = torch.allclose(ego_embd[i], ego_embd[0], 1e-2)
+        #     print(inds)
+        #     ego_cast_locs = self.cast(ego_embd[i][None], mode='ego')
+        #     ego_plan_locs = self.plan(
+        #         ego_embd[i][None], nxp[None], 
+        #         cast_locs=ego_cast_locs,
+        #         pixels_per_meter=self.pixels_per_meter, 
+        #         crop_size=self.crop_size*2
+        #     )
+        #     ego_cast_locs_1.append(ego_cast_locs)
+        #     ego_plan_locs_1.append(ego_plan_locs)
+        
+
+        # return torch.cat(ego_plan_locs_1, 0)[:, -1, cmd], torch.cat(ego_cast_locs_1, 0)[:, cmd]
+        return ego_plan_locs_2[:, -1, cmd], ego_cast_locs_2[:,cmd]
+
+    @torch.no_grad()
+    def infer_test(self, features, cmd, nxp):
+        """
+        B (batch-size) is 1
+        Note: This pixels_per_meter is on original scale
+        self.pixels_per_meter is on feature map's scale
+        """
+
+        H = features.size(1)*2
+        W = features.size(2)*2
+
+        center_x = float(W/2 + self.offset_x*W/2)
+        center_y = float(H/2 + self.offset_y*H/2)
+
+        cropped_ego_features = self.crop_feature(
+            features[None], 
             torch.zeros((1,2),dtype=features.dtype,device=features.device), 
             torch.zeros((1,),dtype=features.dtype,device=features.device),
             pixels_per_meter=self.pixels_per_meter/2, crop_size=self.crop_size
@@ -201,10 +246,9 @@ class UniPlanner(nn.Module):
             cast_locs=ego_cast_locs,
             pixels_per_meter=self.pixels_per_meter, 
             crop_size=self.crop_size*2
-        )
+        )[0,-1,cmd]
 
-        return ego_plan_locs[:, -1, cmd], ego_cast_locs[:,cmd]
-
+        return ego_plan_locs, ego_cast_locs[0,cmd]
 
 
     @torch.no_grad()
@@ -290,8 +334,15 @@ class UniPlanner(nn.Module):
                 u0.expand(self.num_plan, B, -1).permute(1,0,2),
                 cast_locs[:,i]
             ], dim=2)
+            # print(u.shape)
             out, _ = self.plan_gru(u, h0[None])
+            # print(out.shape)
             locs.append(torch.cumsum(self.plan_mlp(out), dim=1))
+            # if out.shape[0] > 1:
+            #     print(u)
+            #     print(h0)
+            #     print(locs[-1])
+
 
         return torch.stack(locs, dim=1) + cast_locs
     
@@ -308,6 +359,7 @@ class UniPlanner(nn.Module):
             plan_locs.append(plan_loc)
 
         return torch.stack(plan_locs, dim=1)
+
 
     def cast(self, embd, mode='ego'):
         B = embd.size(0)
@@ -366,13 +418,11 @@ class UniPlanner(nn.Module):
           torch.stack([k*cos, k*-sin, rot_x_offset+rel_x], dim=-1),
           torch.stack([k*sin, k*cos,  rot_y_offset+rel_y], dim=-1)
         ], dim=-2)
-        
 
         grids = F.affine_grid(theta, torch.Size((B,C,crop_size,crop_size)), align_corners=True)
 
         # TODO: scale the grids??
         cropped_features = F.grid_sample(features, grids, align_corners=True)
-
         return cropped_features
 
     def _make_downsample(self, num_in, num_out, stride=2):

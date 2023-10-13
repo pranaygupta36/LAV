@@ -1,6 +1,7 @@
 wandb/*
 saved_data/*
 weights
+lidar_point_clouds
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

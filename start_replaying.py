@@ -379,6 +379,36 @@ def vis_bev_projected(bev, ego_matrix, camera, pred_loc, det, cast_locs, cast_cm
             bev = cv2.circle(bev, tuple(get_image_point(loc, K, w2c, e2w).astype(int)), 3, color, -1)
     return bev
 
+def lidar_to_bev(lidar, min_x=-10,max_x=70,min_y=-40,max_y=40, pixels_per_meter=4, hist_max_per_pixel=10):
+    xbins = np.linspace(
+        min_x, max_x+1,
+        (max_x - min_x) * pixels_per_meter + 1,
+    )
+    ybins = np.linspace(
+        min_y, max_y+1,
+        (max_y - min_y) * pixels_per_meter + 1,
+    )
+
+    hist = np.histogramdd(lidar[..., :2], bins=(xbins, ybins))[0]
+    hist[hist > hist_max_per_pixel] = hist_max_per_pixel
+
+    overhead_splat = hist / hist_max_per_pixel * 255.
+    return overhead_splat[::-1,:]
+
+def to_numpy(x):
+    return x.detach().cpu().numpy()
+
+def visualize(lidar):
+        lidar_viz = lidar_to_bev(
+            to_numpy(lidar),
+            min_x=-10, max_x=70,
+            min_y=-40, max_y=40,
+            pixels_per_meter=4,
+        ).astype(np.uint8)
+
+        lidar_viz = cv2.cvtColor(lidar_viz, cv2.COLOR_GRAY2RGB)
+        return lidar_viz
+
 def get_speed(history_locations):
     locations = []
     for velocity in history_locations:
@@ -878,42 +908,6 @@ def display_vehicle_ids(vehicles, vis, camera, ego_vehicle, world):
 
     return vis, vehicle_positions
 
-
-def _cleanup(world, ego_vehicle, agent_instance, agent, client, other_actors, sensors_list):
-        """
-        Remove and destroy all actors
-        """
-
-        # Simulation still running and in synchronous mode?
-        # if self.manager and self.manager.get_running_status() \
-        #         and hasattr(self, 'world') and self.world:
-            # Reset to asynchronous mode
-        print('Hello')
-        # world = client.get_world()
-        settings = world.get_settings()
-        settings.synchronous_mode = False
-        settings.fixed_delta_seconds = None
-        world.apply_settings(settings)
-
-        for i, _ in enumerate(sensors_list):
-            if sensors_list[i] is not None:
-                sensors_list[i].stop()
-                sensors_list[i].destroy()
-                sensors_list[i] = None
-        sensors_list = []
-
-        
-        CarlaDataProvider.cleanup()
-        # other_actors = world.get_actors()
-        for actors in other_actors:
-            print(actors)
-            actors.destroy()
-
-        agent.cleanup()
-
-        agent_instance.destroy()
-        del client
-        del world
         
 def _update_timestep(world):
     timestamp = None
@@ -1078,7 +1072,7 @@ def main():
             ego_action, ego_plan_locs, og_det, other_cast_locs, other_cast_cmds, important_vehicles, modded_trajectories, rgb = _agent._agent.run_step(input_data, timestamp, ego_speed, step)    
             # print(ego_action)
             # # print(other_cast_locs)
-            # # print(ego_plan_locs)
+            print(ego_plan_locs)
             ego_matrix = np.array(ego_vehicle.get_transform().get_matrix())
             _, spectator_view = input_data.get('BEV_RGB')
 
@@ -1101,7 +1095,6 @@ def main():
             
             bev_viz, modded_trajectory_vehicles_bb_locations = vis_bev(spectator_view, ego_matrix, spec_camera, ego_plan_locs, og_det, other_cast_locs, other_cast_cmds, important_vehicles)   
             
-            
             vehicle_data = {}
             other_actors = world.get_actors()
             other_actors_vehicles = other_actors.filter('*vehicle*')
@@ -1121,8 +1114,8 @@ def main():
 
             if len(ego_plan_locs) > 0:
                 projected_important_vehicles, projected_modded_trajectories = counterfactual_plan_collide(ego_plan_locs, spec_camera, ego_matrix, ego_vehicle, other_actors, actor_history)
-            bev_viz = vis_bev_projected(bev_viz, ego_matrix, spec_camera, ego_plan_locs, og_det, other_cast_locs, other_cast_cmds, projected_important_vehicles)   
-            cv2.imwrite("./saved_data/" + str(route_id+1) + "/recording_data/bev_projected/projected_" + str(step) + ".png", bev_viz)
+            # bev_viz = vis_bev_projected(bev_viz, ego_matrix, spec_camera, ego_plan_locs, og_det, other_cast_locs, other_cast_cmds, projected_important_vehicles)   
+            # cv2.imwrite("./saved_data/" + str(route_id+1) + "/recording_data/bev_projected/projected_" + str(step) + ".png", bev_viz)
 
             for actor in other_actors:
                 vehicle_data[actor.id] = [str(actor.type_id), [actor.get_acceleration().x, actor.get_acceleration().y, actor.get_acceleration().z], 
@@ -1153,14 +1146,15 @@ def main():
                 os.mkdir("./saved_data/" + str(route_id + 1) + "/og/bev_unmarked")
             if os.path.exists("./saved_data/" + str(route_id + 1) + "/data") == False:
                 os.mkdir("./saved_data/" + str(route_id + 1) + "/data")
-            if len(_agent._agent.locs) > 0:
-                stacked_lidar = get_stacked_lidar(_agent._agent.locs, _agent._agent.oris, _agent._agent.lidars, _agent._agent.num_frame_stack)
-                lidar_points = torch.tensor(stacked_lidar, dtype=torch.float32)
+            # if len(_agent._agent.locs) > 0:
+            #     stacked_lidar = get_stacked_lidar(_agent._agent.locs, _agent._agent.oris, _agent._agent.lidars, _agent._agent.num_frame_stack)
+            #     lidar_points = torch.tensor(stacked_lidar, dtype=torch.float32)
             
             ego_action.manual_gear_shift = False
             # ego_action, ego_locs = self._agent(self.step)
-            
+            print(len(_agent._agent.lidars))
             og_lidars = [np.copy(i) for i in _agent._agent.lidars]
+            print(len(og_lidars))
             colors = [ 
             carla.Color(r = 255, g = 0, b = 0), 
             carla.Color(r = 0, g = 255, b = 0),
@@ -1174,7 +1168,15 @@ def main():
             ors = []
             visible_vehicles = {}
             mod_lidar_list = []
-            for vehicle in other_actors:
+            sel_vehicles = []
+            actor_dists = []
+            for v in other_actors:
+                ego_location = [ego_vehicle.get_transform().location.x, ego_vehicle.get_transform().location.y, ego_vehicle.get_transform().location.z]
+                v_location = [v.get_transform().location.x, v.get_transform().location.y, v.get_transform().location.z]
+                actor_dists.append(np.linalg.norm(np.array(ego_location) - np.array(v_location)))
+            inds = np.argsort(np.array(actor_dists))
+            for vehicle_i in inds[:10]:
+                vehicle = other_actors[vehicle_i]
                 if vehicle.id == ego_vehicle.id:
                     continue
                 mod_lidars = deque()
@@ -1205,17 +1207,24 @@ def main():
 
                     if is_visible:
                         # mod_lidar_list.append(mod_lidars)
-                        _agent._agent.lidars = [mod_lidars]
-                        object_removal_ego_locs = _agent._agent.run_step(input_data, timestamp, step, 'object_removal', int(vehicle.id))
+                        mod_lidar_list.append(mod_lidars)
+                        sel_vehicles.append(vehicle)
+                        # object_removal_ego_locs = _agent._agent.run_step(input_data, timestamp, step, 'object_removal', int(vehicle.id))
                         #checking the removed point cloud
                         
                         # stacked_lidar = get_stacked_lidar(_agent._agent.locs, _agent._agent.oris, mod_lidars, _agent._agent.num_frame_stack)
-                        lidar_points = torch.tensor(stacked_lidar, dtype=torch.float32)
-                        err = np.linalg.norm(ego_plan_locs - object_removal_ego_locs)
-                        errors.append(err)
-                        object_removal_scores.append([vehicle, err, object_removal_ego_locs])
-                        ors.append([vehicle.id, err, object_removal_ego_locs])
-
+                        # lidar_points = torch.tensor(stacked_lidar, dtype=torch.float32)
+                        # vis_one_objects =  visualize(lidar_points)
+                        # cv2.imwrite("./lidar_point_clouds/" + str(step) + "_" + str(vehicle.id) + ".png", vis_one_objects)
+            
+            if len(_agent._agent.lidars) > 0:
+                print(len(mod_lidar_list))
+                _agent._agent.lidars = mod_lidar_list
+                object_removal_ego_locs = _agent._agent.run_step(input_data, timestamp, step, 'object_removal', int(vehicle.id))
+                for sv in range(len(sel_vehicles)):                    
+                    err = np.linalg.norm(ego_plan_locs - object_removal_ego_locs[sv])
+                    object_removal_scores.append([sel_vehicles[sv], err, object_removal_ego_locs[sv]])
+                    ors.append([sel_vehicles[sv].id, err, object_removal_ego_locs[sv]])
 
             _agent._agent.lidars = deque(og_lidars)
                     
@@ -1225,7 +1234,7 @@ def main():
             spectator_view, vehicle_positions = display_vehicle_ids([i[0] for i in object_removal_scores], spectator_view, spec_camera, ego_vehicle, world)
             # print(vehicle_positions)
             # spectator_view, vehicle_positions = display_vehicle_ids([], spectator_view, spec_camera, self.ego_vehicles[0], world)
-            cv2.imwrite("./saved_data/" + str(str(route_id + 1)) + "/og/bev_unmarked/" + str(step) + ".png", spectator_view)
+            # cv2.imwrite("./saved_data/" + str(str(route_id + 1)) + "/og/bev_unmarked/" + str(step) + ".png", spectator_view)
                 
             data = np.array([important_vehicles, important_vehicles_bb_locations, ors, [], og_det, vehicle_positions])
             np.save("./saved_data/" + str(str(route_id + 1)) + "/data/" + str(step) + '.npy', data)

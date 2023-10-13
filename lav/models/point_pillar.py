@@ -87,17 +87,19 @@ class PointPillarNet(nn.Module):
     def scatter_points(self, features, coords, batch_size ):
         canvas = torch.zeros(batch_size, features.shape[1], self.ny, self.nx, dtype=features.dtype, device=features.device)
         canvas[coords[:, 0], :, torch.clamp(self.ny-1-coords[:, 1],0,self.ny-1), torch.clamp(coords[:, 2],0,self.nx-1)] = features
+        # for b in range(len(canvas)):
+        #     inds = torch.argwhere(canvas[0] != canvas[b])
+        #     print(inds)
         return canvas 
 
     def forward(self, lidar_list, num_points):
         batch_size = len(lidar_list)
         with torch.no_grad():
             coords = [] 
-            filtered_points = [] 
+            filtered_points = []
             for batch_id, points in enumerate(lidar_list):
                 points = points[:num_points[batch_id]]
                 points, grid_yx= self.grid_locations(points)
-
                 # batch indices 
                 grid_byx = torch.nn.functional.pad(grid_yx, 
                     (1, 0), mode='constant', value=batch_id)
@@ -106,11 +108,11 @@ class PointPillarNet(nn.Module):
                 filtered_points.append(points)
 
             # batch_size, grid_y, grid_x 
+            
             coords = torch.cat(coords, dim=0)
             filtered_points = torch.cat(filtered_points, dim=0)
-
             decorated_points, unique_coords, inverse_indices = self.pillar_generation(filtered_points, coords)
-
+        # for i in range(decorated_points.shape[0]):
+        #     print(decorated_points[i, 0, 75:80, 75:80])
         features = self.point_net(decorated_points, inverse_indices)
-
         return self.scatter_points(features, unique_coords, batch_size)
