@@ -184,6 +184,30 @@ class UniPlanner(nn.Module):
         return pred_ego_locs[:,0]
 
     @torch.no_grad()
+    def infer_egoonly_batched(self, features, cmd, nxp):
+        """
+        This is for generating the counterfactual trajectory of the ego vehicle
+        """
+        cropped_ego_features = self.crop_feature(
+            features, 
+            torch.zeros((1,2),dtype=features.dtype,device=features.device), 
+            torch.zeros((1,),dtype=features.dtype,device=features.device),
+            pixels_per_meter=self.pixels_per_meter/2, crop_size=self.crop_size
+        )
+        ego_embd = self.lidar_conv_emb(cropped_ego_features)
+        ego_cast_locs = self.cast(ego_embd, mode='ego')
+        ego_plan_locs = self.plan(
+            ego_embd, nxp[None], 
+            cast_locs=ego_cast_locs,
+            pixels_per_meter=self.pixels_per_meter, 
+            crop_size=self.crop_size*2
+        )
+
+        return ego_plan_locs[:, -1, cmd], ego_cast_locs[:,cmd]
+
+
+
+    @torch.no_grad()
     def infer(self, features, det, cmd, nxp):
         """
         B (batch-size) is 1

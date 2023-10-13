@@ -879,6 +879,55 @@ def display_vehicle_ids(vehicles, vis, camera, ego_vehicle, world):
     return vis, vehicle_positions
 
 
+def _cleanup(world, ego_vehicle, agent_instance, agent, client, other_actors, sensors_list):
+        """
+        Remove and destroy all actors
+        """
+
+        # Simulation still running and in synchronous mode?
+        # if self.manager and self.manager.get_running_status() \
+        #         and hasattr(self, 'world') and self.world:
+            # Reset to asynchronous mode
+        print('Hello')
+        # world = client.get_world()
+        settings = world.get_settings()
+        settings.synchronous_mode = False
+        settings.fixed_delta_seconds = None
+        world.apply_settings(settings)
+
+        for i, _ in enumerate(sensors_list):
+            if sensors_list[i] is not None:
+                sensors_list[i].stop()
+                sensors_list[i].destroy()
+                sensors_list[i] = None
+        sensors_list = []
+
+        
+        CarlaDataProvider.cleanup()
+        # other_actors = world.get_actors()
+        for actors in other_actors:
+            print(actors)
+            actors.destroy()
+
+        agent.cleanup()
+
+        agent_instance.destroy()
+        del client
+        del world
+        
+def _update_timestep(world):
+    timestamp = None
+    if world:
+        snapshot = world.get_snapshot()
+        if snapshot:
+            timestamp = snapshot.timestamp
+    if timestamp:            
+        # Update game time and actor information
+        GameTime.on_carla_tick(timestamp)
+        CarlaDataProvider.on_carla_tick()
+    return timestamp
+
+
 def main():
 
     argparser = argparse.ArgumentParser(
@@ -937,23 +986,38 @@ def main():
     try:
         
         client = carla.Client(args.host, args.port)
+        print("Client connected to server")
+        world = client.get_world()
         client.set_timeout(60.0)
+        print("Client connected to server1")
 
         # set the time factor for the replayer
         client.set_replayer_time_factor(args.time_factor)
+        print("Client connected to server2")
 
         # set to ignore the hero vehicles or not
         client.set_replayer_ignore_hero(args.ignore_hero)
+        print("Client connected to server3")
 
         # replay the session
-        print(client.replay_file(args.recorder_filename, args.start, args.duration, args.camera))
-        world = client.get_world()
+        client.load_world('Town01')
         new_settings = world.get_settings()
         new_settings.synchronous_mode = True
         new_settings.fixed_delta_seconds = 1./20 #chck in args
         world.apply_settings(new_settings) 
         CarlaDataProvider.set_client(client)
         CarlaDataProvider.set_world(world)
+
+        replay_info_str = client.replay_file(args.recorder_filename, args.start, args.duration, args.camera)
+        for line in replay_info_str.split("\n"):
+            if "Total time recorded" in line:
+                replay_duration = float(line.split(": ")[-1])
+                break
+        if args.duration != 0:
+            replay_duration = args.duration
+
+        # replay_duration = 5.0
+        print(replay_info_str)
 
         # print(CarlaDataProvider)
         world.tick()
@@ -1000,18 +1064,21 @@ def main():
         ego_speed = 0
         actor_history = {}
         errors = []
+        replay_init_timestamp = None
+
         while True:
             step+=1 
             print(step)
+            _update_timestep(world)
             ego_trans = ego_vehicle.get_transform()
             _spectator.set_transform(carla.Transform(ego_trans.location + carla.Location(z=50),carla.Rotation(pitch=-90)))
             input_data = _agent._agent.sensor_interface.get_data()
             timestamp = GameTime.get_time()
             ego_speed = get_forward_speed( ego_vehicle.get_transform(), ego_vehicle.get_velocity())
             ego_action, ego_plan_locs, og_det, other_cast_locs, other_cast_cmds, important_vehicles, modded_trajectories, rgb = _agent._agent.run_step(input_data, timestamp, ego_speed, step)    
-            print(ego_action)
-            # print(other_cast_locs)
-            # print(ego_plan_locs)
+            # print(ego_action)
+            # # print(other_cast_locs)
+            # # print(ego_plan_locs)
             ego_matrix = np.array(ego_vehicle.get_transform().get_matrix())
             _, spectator_view = input_data.get('BEV_RGB')
 
@@ -1025,10 +1092,7 @@ def main():
 
             if os.path.exists("./saved_data/" + str(route_id+1) + '/recording_data/') == False:
                 os.mkdir("./saved_data/" + str(route_id+1) + '/recording_data/')
-            
-            if os.path.exists("./saved_data/" + str(route_id+1) + '/recording_data/bev') == False:
-                os.mkdir("./saved_data/" + str(route_id+1) + '/recording_data/bev')
-            
+                        
             if os.path.exists("./saved_data/" + str(route_id+1) + '/recording_data/bev_projected') == False:
                 os.mkdir("./saved_data/" + str(route_id+1) + '/recording_data/bev_projected')
             
@@ -1036,7 +1100,6 @@ def main():
                 os.mkdir("./saved_data/" + str(route_id+1) + '/recording_data/data')
             
             bev_viz, modded_trajectory_vehicles_bb_locations = vis_bev(spectator_view, ego_matrix, spec_camera, ego_plan_locs, og_det, other_cast_locs, other_cast_cmds, important_vehicles)   
-            cv2.imwrite("./saved_data/" + str(route_id+1) + "/recording_data/bev/" + str(step) + ".png", bev_viz)
             
             
             vehicle_data = {}
@@ -1110,6 +1173,7 @@ def main():
             object_removal_scores = []
             ors = []
             visible_vehicles = {}
+            mod_lidar_list = []
             for vehicle in other_actors:
                 if vehicle.id == ego_vehicle.id:
                     continue
@@ -1140,12 +1204,12 @@ def main():
                         # print(mod_lidars)
 
                     if is_visible:
-                        assnd_color = colors[0]
-                        _agent._agent.lidars = mod_lidars
-                        _, object_removal_ego_locs, object_removal_det = _agent._agent.run_step(input_data, timestamp, step, 'object_removal', int(vehicle.id))
+                        # mod_lidar_list.append(mod_lidars)
+                        _agent._agent.lidars = [mod_lidars]
+                        object_removal_ego_locs = _agent._agent.run_step(input_data, timestamp, step, 'object_removal', int(vehicle.id))
                         #checking the removed point cloud
                         
-                        stacked_lidar = get_stacked_lidar(_agent._agent.locs, _agent._agent.oris, mod_lidars, _agent._agent.num_frame_stack)
+                        # stacked_lidar = get_stacked_lidar(_agent._agent.locs, _agent._agent.oris, mod_lidars, _agent._agent.num_frame_stack)
                         lidar_points = torch.tensor(stacked_lidar, dtype=torch.float32)
                         err = np.linalg.norm(ego_plan_locs - object_removal_ego_locs)
                         errors.append(err)
@@ -1168,9 +1232,49 @@ def main():
             
             
             world.tick()
+            if step == 1:
+                replay_init_timestamp = timestamp
+            print(replay_init_timestamp, timestamp)
+            if replay_init_timestamp is not None:
+                if (timestamp - replay_init_timestamp) > replay_duration + 1 :
+                    raise KeyboardInterrupt
 
     finally:
-        pass
+        # this = sys.modules[__name__]
+        # for n in dir():
+        #     if n[0]!='_': delattr(this, n)
+        # _cleanup(world, ego_vehicle, agent_instance, _agent, client, other_actors, sensor_list)
+        settings = world.get_settings()
+        settings.synchronous_mode = False
+        settings.fixed_delta_seconds = replay_duration
+        world.apply_settings(settings)
+        print(world.get_settings().synchronous_mode)
+        while True:
+            world.tick()
+            _update_timestep(world)
+            timestamp = GameTime.get_time()
+            print(timestamp, replay_init_timestamp, replay_duration, world.get_snapshot().timestamp)
+            if (timestamp - replay_init_timestamp) > replay_duration + 1 :
+                break
+
+        for i, _ in enumerate(sensor_list):
+            if sensor_list[i] is not None:
+                sensor_list[i].stop()
+                sensor_list[i].destroy()
+                sensor_list[i] = None
+        sensor_list = []
+        del sensor_list            
+        CarlaDataProvider.cleanup()
+        other_actors = world.get_actors()
+        other_actors_vehicles = other_actors.filter('*vehicle*')
+        other_actors_pedestrians = other_actors.filter('*pedestrian*')
+        other_actors = list(other_actors_vehicles) + list(other_actors_pedestrians)
+        for actors in other_actors:
+            print(actors)
+            actors.destroy()
+
+        del client
+        del world
 
 
 if __name__ == '__main__':

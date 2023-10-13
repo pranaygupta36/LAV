@@ -42,6 +42,13 @@ class LiDARModel(nn.Module):
             self.ori_head(features),
             self.seg_head(features),
         )
+    
+    def extract_features_only(self, lidars, num_points):
+
+        features = self.point_pillar_net(lidars, num_points)
+        features = self.backbone(features)
+
+        return features
 
 
 

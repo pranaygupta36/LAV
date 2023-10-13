@@ -372,56 +372,24 @@ class LAVAgent(AutonomousAgent):
             # viz = self.visualize(rgb, tel_rgb, lidar_points, float(self.pred_bra), to_numpy(torch.sigmoid(pred_bev[0])), ego_plan_locs, other_cast_locs, other_cast_cmds, det, [-self.wx, -self.wy], self.cmd_value, spd, steer, throt, brake)
             # self.vizs.append(viz)
 
-            if len(self.vizs) >= 5000:
+            # if len(self.vizs) >= 5000:
                 # self.flush_data()
-                print("hello")
             return carla.VehicleControl(steer=steer, throttle=throt, brake=brake), ego_plan_locs, det, other_cast_locs, other_cast_cmds, important_vehicles, modded_trajectories, rgb
         else:
-            stacked_lidar = self.get_stacked_lidar()
-            lidar_points = torch.tensor(stacked_lidar, dtype=torch.float32).to(self.device)
-            features,      \
-            pred_heatmaps, \
-            pred_sizemaps, \
-            pred_orimaps,  \
-            pred_bev = self.lidar_model([lidar_points], [len(lidar_points)])
-            det = self.det_inference(torch.sigmoid(pred_heatmaps[0]), pred_sizemaps[0], pred_orimaps[0])
-            ego_plan_locs, ego_cast_locs, other_cast_locs, other_cast_cmds = self.uniplanner.infer(features[0], det[1], self.cmd_value, self.nxps)
+            stacked_lidar = self.get_stacked_lidar_batch()
+            lidar_points = [torch.tensor(s, dtype=torch.float32).to(self.device) for s in stacked_lidar]
+            features = self.lidar_model.extract_features_only(lidar_points, [len(l) for l in lidar_points])
+            #DONE TILL HERE
+            ego_plan_locs, ego_cast_locs = self.uniplanner.infer_egoonly_batched(features, self.cmd_value, self.nxps)
             ego_plan_locs = to_numpy(ego_plan_locs)
             ego_cast_locs = to_numpy(ego_cast_locs)
-            other_cast_locs = to_numpy(other_cast_locs)
-            other_cast_cmds = to_numpy(other_cast_cmds)
             if self.cmd_value in [4,5]:
-                ego_plan_locs = ego_cast_locs
-
-            if not np.isnan(ego_plan_locs).any():
-                steer, throt, brake = self.pid_control(ego_plan_locs, self.spd, self.cmd_value)
-            else:
-                steer, throt, brake = 0, 0, 0
-
-            if float(self.pred_bra) > 0.1:
-                throt, brake = 0, 1
-            elif self.plan_collide(ego_plan_locs, other_cast_locs, other_cast_cmds):
-                throt, brake = 0, 1
-            if self.spd * 3.6 > self.max_speed:
-                throt = 0
-
-            viz = self.visualize(self.rgb, self.tel_rgb, lidar_points, float(self.pred_bra), to_numpy(torch.sigmoid(pred_bev[0])), ego_plan_locs, other_cast_locs, other_cast_cmds, det, [-self.wx, -self.wy], self.cmd_value, self.spd, steer, throt, brake)
-            # if vehicle_id not in self.counter_factual_vizs.keys():
-            #     self.counter_factual_vizs[vehicle_id] = [viz]
-            # else:
-            #     self.counter_factual_vizs[vehicle_id].append(viz)
-            
-            # if len(self.counter_factual_vizs[vehicle_id])>200:
-            #     self.flush_counterfactual_data(vehicle_id)
-                
-
-            return carla.VehicleControl(steer=steer, throttle=throt, brake=brake), ego_plan_locs, det
-
-
+                ego_plan_locs = ego_cast_locs                
+            return ego_plan_locs
+    
     def get_stacked_lidar(self):
         
         loc0, ori0 = self.locs[-1], self.oris[-1]
-
         rel_lidars = []
         for i, t in enumerate(range(len(self.lidars)-1, -1, -GAP)):
             loc, ori = self.locs[t], self.oris[t]
@@ -437,8 +405,32 @@ class LAVAgent(AutonomousAgent):
             rel_lidar = np.concatenate([lidar_xyz, lidar_f, lidar_t], axis=-1)
 
             rel_lidars.append(rel_lidar)
+            
+            return np.concatenate(rel_lidars)
 
-        return np.concatenate(rel_lidars)
+    def get_stacked_lidar_batch(self):
+        
+        loc0, ori0 = self.locs[-1], self.oris[-1]
+        batched_rel_lidars = []
+        for b in range(len(self.lidars)):
+            rel_lidars = []
+            for i, t in enumerate(range(len(self.lidars[b])-1, -1, -GAP)):
+                loc, ori = self.locs[t], self.oris[t]
+                lidar = self.lidars[b][t]
+
+                lidar_xyz = lidar[:,:3]
+                lidar_f = lidar[:,3:]
+
+                lidar_xyz = move_lidar_points(lidar_xyz, loc - loc0, ori0, ori)
+                lidar_t = np.zeros((len(lidar_xyz), self.num_frame_stack+1), dtype=lidar_xyz.dtype)
+                lidar_t[:,i] = 1      # Be extra careful on this.
+
+                rel_lidar = np.concatenate([lidar_xyz, lidar_f, lidar_t], axis=-1)
+
+                rel_lidars.append(rel_lidar)
+            batched_rel_lidars.append(np.concatenate(rel_lidars))
+
+            return batched_rel_lidars
 
     def counterfactual_plan_collide(self, ego_plan_locs, other_cast_locs, other_cast_cmds, dist_threshold_static=1.0, dist_threshold_moving=2.5):
         # TODO: Do a proper occupancy map?
@@ -609,7 +601,6 @@ class LAVAgent(AutonomousAgent):
 
         return float(steer), float(throttle), float(brake)
 
-
     def det_inference(self, heatmaps, sizemaps, orimaps, **kwargs):
 
         dets = []
@@ -630,6 +621,47 @@ class LAVAgent(AutonomousAgent):
             dets.append(det)
         
         return dets
+
+
+    def det_inference_batched(self, heatmaps, sizemaps, orimaps, **kwargs):
+        print(heatmaps.shape)
+        print(sizemaps.shape)
+        print(orimaps.shape)
+        dets = []
+        for i in range(heatmaps.shape[1]):
+            det = []
+            c = heatmaps[:, i]
+            out = extract_peak_batched(c, **kwargs) # B x len(det)
+            print(out)
+            for b in range(len(out)):
+                print(len(out[b]))
+                for s, x, y in out[b]:
+                    print(y, x)
+                    w, h = float(sizemaps[:,0,y,x]),float(sizemaps[:,1,y,x])
+                    cos, sin = float(orimaps[:,0,y,x]), float(orimaps[:,1,y,x])
+                    
+                    if i==1 and w < 0.1*self.pixels_per_meter or h < 0.2*self.pixels_per_meter:
+                        continue
+                    
+                    # TODO: remove hardcode
+                    # if np.linalg.norm([x-160,y-280]) <= 2:
+                    #     continue
+
+                    det.append((x,y,w,h,cos,sin))
+                dets.append(det)
+        
+        print(dets)
+        batched_dets = []
+        b = heatmaps.shape[0]
+        for i in range(b):
+            k = i
+            per_batch_det = []
+            while k < len(dets):
+                print(k)
+                per_batch_det.append(dets[k])
+                k += b
+            batched_dets.append(per_batch_det)
+        return batched_dets
 
     def preprocess(self, lidar_xyzr, lidar_painted=None):
 
@@ -746,3 +778,22 @@ def extract_peak(heatmap, max_pool_ks=7, min_score=0.1, max_det=15, break_tie=Fa
 
     return [(float(s), int(l) % heatmap.size(1), int(l) // heatmap.size(1))
             for s, l in zip(score.cpu(), loc.cpu()) if s > min_score]
+
+def extract_peak_batched(heatmap, max_pool_ks=7, min_score=0.1, max_det=15, break_tie=False):
+
+    # Credit: Prof. Philipp Krähenbühl in CS394D
+    
+    if break_tie:
+        heatmap = heatmap + 1e-7*torch.randn(*heatmap.size(), device=heatmap.device)
+
+    max_cls = F.max_pool2d(heatmap[:, None], kernel_size=max_pool_ks, padding=max_pool_ks//2, stride=1)[:, 0]
+    possible_det = heatmap - (max_cls > heatmap).float() * 1e5
+    if max_det > possible_det.numel():
+        max_det = possible_det.numel()
+    score, loc = torch.topk(possible_det.view(possible_det.shape[0], -1), max_det)
+
+    out = []
+    for b in range(score.shape[0]):
+        out.append([(float(s), int(l) % heatmap.size(1), int(l) // heatmap.size(1))
+            for s, l in zip(score[b].cpu(), loc[b].cpu()) if s > min_score])
+    return out
