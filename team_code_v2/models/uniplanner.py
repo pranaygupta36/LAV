@@ -202,53 +202,8 @@ class UniPlanner(nn.Module):
             pixels_per_meter=self.pixels_per_meter, 
             crop_size=self.crop_size*2
         )
-        # for i in range(ego_embd.shape[0]):
-        #     inds = torch.allclose(ego_embd[i], ego_embd[0], 1e-2)
-        #     print(inds)
-        #     ego_cast_locs = self.cast(ego_embd[i][None], mode='ego')
-        #     ego_plan_locs = self.plan(
-        #         ego_embd[i][None], nxp[None], 
-        #         cast_locs=ego_cast_locs,
-        #         pixels_per_meter=self.pixels_per_meter, 
-        #         crop_size=self.crop_size*2
-        #     )
-        #     ego_cast_locs_1.append(ego_cast_locs)
-        #     ego_plan_locs_1.append(ego_plan_locs)
         
-
-        # return torch.cat(ego_plan_locs_1, 0)[:, -1, cmd], torch.cat(ego_cast_locs_1, 0)[:, cmd]
         return ego_plan_locs_2[:, -1, cmd], ego_cast_locs_2[:,cmd]
-
-    @torch.no_grad()
-    def infer_test(self, features, cmd, nxp):
-        """
-        B (batch-size) is 1
-        Note: This pixels_per_meter is on original scale
-        self.pixels_per_meter is on feature map's scale
-        """
-
-        H = features.size(1)*2
-        W = features.size(2)*2
-
-        center_x = float(W/2 + self.offset_x*W/2)
-        center_y = float(H/2 + self.offset_y*H/2)
-
-        cropped_ego_features = self.crop_feature(
-            features[None], 
-            torch.zeros((1,2),dtype=features.dtype,device=features.device), 
-            torch.zeros((1,),dtype=features.dtype,device=features.device),
-            pixels_per_meter=self.pixels_per_meter/2, crop_size=self.crop_size
-        )
-        ego_embd = self.lidar_conv_emb(cropped_ego_features)
-        ego_cast_locs = self.cast(ego_embd, mode='ego')
-        ego_plan_locs = self.plan(
-            ego_embd, nxp[None], 
-            cast_locs=ego_cast_locs,
-            pixels_per_meter=self.pixels_per_meter, 
-            crop_size=self.crop_size*2
-        )[0,-1,cmd]
-
-        return ego_plan_locs, ego_cast_locs[0,cmd]
 
 
     @torch.no_grad()
@@ -285,7 +240,8 @@ class UniPlanner(nn.Module):
         oris = torch.tensor(oris, dtype=torch.float32).to(features.device)
 
         N = len(locs)
-        N_features = features.expand(N, *features.size())
+        og_feats = features[0]
+        N_features = og_feats.expand(N, *og_feats.size())
 
         if N > 0:
             cropped_other_features = self.crop_feature(
@@ -302,10 +258,11 @@ class UniPlanner(nn.Module):
             other_cast_locs = torch.zeros((N,self.num_cmds,self.num_plan,2))
             other_cast_cmds = torch.zeros((N,self.num_cmds))
 
+        
         cropped_ego_features = self.crop_feature(
-            features[None], 
-            torch.zeros((1,2),dtype=features.dtype,device=features.device), 
-            torch.zeros((1,),dtype=features.dtype,device=features.device),
+            features, 
+            torch.zeros((features.shape[0],2),dtype=features.dtype,device=features.device), 
+            torch.zeros((features.shape[0],),dtype=features.dtype,device=features.device),
             pixels_per_meter=self.pixels_per_meter/2, crop_size=self.crop_size
         )
         ego_embd = self.lidar_conv_emb(cropped_ego_features)
@@ -315,9 +272,9 @@ class UniPlanner(nn.Module):
             cast_locs=ego_cast_locs,
             pixels_per_meter=self.pixels_per_meter, 
             crop_size=self.crop_size*2
-        )[0,-1,cmd]
+        )
 
-        return ego_plan_locs, ego_cast_locs[0,cmd], other_cast_locs, other_cast_cmds
+        return ego_plan_locs[:, -1, cmd], ego_cast_locs[:,cmd], other_cast_locs, other_cast_cmds
 
 
     def _plan(self, embd, nxp, cast_locs, pixels_per_meter=4, crop_size=96):

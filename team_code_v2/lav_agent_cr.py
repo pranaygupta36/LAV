@@ -145,6 +145,7 @@ class LAVAgent(AutonomousAgent):
         self.lidars = deque([])
         self.locs = deque([])
         self.oris = deque([])
+        self.cr_lidars = deque([])
 
 
         # Book-keeping
@@ -199,6 +200,7 @@ class LAVAgent(AutonomousAgent):
 
         self.ekf = None
         self.lidars.clear()
+        self.cr_lidars.clear()
         self.locs.clear()
         self.oris.clear()
 
@@ -286,8 +288,6 @@ class LAVAgent(AutonomousAgent):
                 self.oris.popleft()
                 self.frames.popleft()
 
-            stacked_lidar = self.get_stacked_lidar()
-
             # High-level commands
             if self.waypointer is None:
 
@@ -323,21 +323,38 @@ class LAVAgent(AutonomousAgent):
             self.rgbs = torch.tensor(rgb[None]).permute(0,3,1,2).float().to(self.device)
             self.tel_rgbs= torch.tensor(tel_rgb[None]).permute(0,3,1,2).float().to(self.device)
             self.pred_bra = self.bra_model(self.rgbs, self.tel_rgbs)
+            return 
+        else:
+            _, gps   = input_data.get('GPS')
+            _, imu   = input_data.get('IMU')
+            compass = imu[-1]
 
+            stacked_lidar = self.get_stacked_lidar_batch()
+            lidar_points = [torch.tensor(s, dtype=torch.float32).to(self.device) for s in stacked_lidar]
+            # # print(lidar_points)
+            # features = self.lidar_model.extract_features_only(lidar_points, [len(l) for l in lidar_points])
+            # ego_plan_locs, ego_cast_locs = self.uniplanner.infer_egoonly_batched(features, self.cmd_value, self.nxps)
+            # ego_plan_locs = to_numpy(ego_plan_locs)
+            # ego_cast_locs = to_numpy(ego_cast_locs)
+            # if self.cmd_value in [4,5]:
+            #     ego_plan_locs = ego_cast_locs                
+            # return ego_plan_locs
+            
+            
             # Heavy duties
-            lidar_points = torch.tensor(stacked_lidar, dtype=torch.float32).to(self.device)
+            # lidar_points = torch.tensor(stacked_lidar, dtype=torch.float32).to(self.device)
             self.nxps = torch.tensor([-self.wx,-self.wy]).float().to(self.device)
             features,      \
             pred_heatmaps, \
             pred_sizemaps, \
             pred_orimaps,  \
-            pred_bev = self.lidar_model([lidar_points], [len(lidar_points)])
+            pred_bev = self.lidar_model(lidar_points, [len(l) for l in lidar_points])
 
             # Object detection
             det = self.det_inference(torch.sigmoid(pred_heatmaps[0]), pred_sizemaps[0], pred_orimaps[0])
 
             # Motion forecast & planning
-            ego_plan_locs, ego_cast_locs, other_cast_locs, other_cast_cmds = self.uniplanner.infer(features[0], det[1], self.cmd_value, self.nxps)
+            ego_plan_locs, ego_cast_locs, other_cast_locs, other_cast_cmds = self.uniplanner.infer(features, det[1], self.cmd_value, self.nxps)
             ego_plan_locs = to_numpy(ego_plan_locs)
             ego_cast_locs = to_numpy(ego_cast_locs)
             other_cast_locs = to_numpy(other_cast_locs)
@@ -346,18 +363,18 @@ class LAVAgent(AutonomousAgent):
             if self.cmd_value in [4,5]:
                 ego_plan_locs = ego_cast_locs
 
-            if not np.isnan(ego_plan_locs).any():
-                steer, throt, brake = self.pid_control(ego_plan_locs, spd, self.cmd_value)
+            if not np.isnan(ego_plan_locs[0]).any():
+                steer, throt, brake = self.pid_control(ego_plan_locs[0], spd, self.cmd_value)
             else:
                 steer, throt, brake = 0, 0, 0
 
             self.ekf.step(spd, steer, *gps[:2], compass-math.pi/2)
 
-            important_vehicles, modded_trajectories = self.counterfactual_plan_collide(ego_plan_locs, other_cast_locs, other_cast_cmds)
+            important_vehicles, modded_trajectories = self.counterfactual_plan_collide(ego_plan_locs[0], other_cast_locs, other_cast_cmds)
 
             if float(self.pred_bra) > 0.1:
                 throt, brake = 0, 1
-            elif self.plan_collide(ego_plan_locs, other_cast_locs, other_cast_cmds):
+            elif self.plan_collide(ego_plan_locs[0], other_cast_locs, other_cast_cmds):
                 throt, brake = 0, 1
             if spd * 3.6 > self.max_speed:
                 throt = 0
@@ -374,30 +391,8 @@ class LAVAgent(AutonomousAgent):
 
             # if len(self.vizs) >= 5000:
                 # self.flush_data()
-            return carla.VehicleControl(steer=steer, throttle=throt, brake=brake), ego_plan_locs, det, other_cast_locs, other_cast_cmds, important_vehicles, modded_trajectories, rgb
-        else:
-            stacked_lidar = self.get_stacked_lidar_batch()
-            lidar_points = [torch.tensor(s, dtype=torch.float32).to(self.device) for s in stacked_lidar]
-            # print(lidar_points)
-            features = self.lidar_model.extract_features_only(lidar_points, [len(l) for l in lidar_points])
-            print(features.shape)
-            # epl = []
-            # ecl = []
-            ego_plan_locs, ego_cast_locs = self.uniplanner.infer_egoonly_batched(features, self.cmd_value, self.nxps)
-
-            # for i in range(len(features)):
-            #     ego_plan_locs, ego_cast_locs = self.uniplanner.infer_egoonly_batched(features[i][None], self.cmd_value, self.nxps)
-            #     epl.append(ego_plan_locs)
-            #     ecl.append(ego_cast_locs)
-            ego_plan_locs = to_numpy(ego_plan_locs)
-            ego_cast_locs = to_numpy(ego_cast_locs)
-                
-            # ego_plan_locs = to_numpy(torch.cat(epl, 0))
-            # ego_cast_locs = to_numpy(torch.cat(ecl, 0))
-            # print(ego_plan_locs.shape)
-            if self.cmd_value in [4,5]:
-                ego_plan_locs = ego_cast_locs                
-            return ego_plan_locs
+            return carla.VehicleControl(steer=steer, throttle=throt, brake=brake), ego_plan_locs, det, other_cast_locs, other_cast_cmds, important_vehicles, modded_trajectories
+            
     
     def get_stacked_lidar(self):
         
